@@ -76,6 +76,10 @@ struct Cli {
     #[arg(long = "cache-ttl", global = true, default_value = "60")]
     cache_ttl: u64,
 
+    /// Tab-separated output (one result per line)
+    #[arg(long = "tsv", global = true)]
+    tsv: bool,
+
     /// Verbose output for debugging
     #[arg(short = 'v', long = "verbose", global = true)]
     verbose: bool,
@@ -616,6 +620,17 @@ fn print_search_results(cli: &Cli, results: &SearchResponse) -> Result<()> {
     let max_chars = get_max_chars(cli);
     let fields = parse_fields(cli);
 
+    if cli.tsv {
+        // Header
+        println!("title\turl\tdate");
+        for r in &results.results {
+            let title = r.title.as_deref().unwrap_or("N/A").replace('\t', " ");
+            let date = r.published_date.as_deref().unwrap_or("");
+            println!("{}\t{}\t{}", title, r.url, date);
+        }
+        return Ok(());
+    }
+
     if cli.compact {
         for (i, r) in results.results.iter().enumerate() {
             if show_field(&fields, "title") {
@@ -886,9 +901,19 @@ async fn cmd_research(client: &mut ExaClient, cli: &Cli, query: String) -> Resul
             "canceled" => {
                 bail!("Research task was canceled");
             }
-            _ => continue,
+            _ => {
+                // Streaming: print dot to stderr so user knows it's working
+                if !cli.json && !cli.compact {
+                    eprint!(".");
+                }
+                continue;
+            },
         }
     };
+
+    if !cli.json && !cli.compact {
+        eprintln!(); // newline after dots
+    }
 
     if cli.json {
         println!("{}", to_json(&result, cli.compact)?);

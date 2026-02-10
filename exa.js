@@ -81,6 +81,7 @@ function parseArgs(args) {
     fields: null,
     noCache: false,
     cacheTtl: 60,
+    tsv: false,
   };
 
   let i = 0;
@@ -123,6 +124,8 @@ function parseArgs(args) {
       opts.noCache = true;
     } else if (arg === "--cache-ttl") {
       opts.cacheTtl = parseInt(args[++i], 10) || 60;
+    } else if (arg === "--tsv") {
+      opts.tsv = true;
     } else if (!opts.command && ["search", "find", "content", "answer", "research"].includes(arg)) {
       opts.command = arg;
     } else if (!arg.startsWith("-")) {
@@ -238,6 +241,15 @@ function printSearchResults(opts, results) {
 
   const max = opts.effectiveMaxChars;
   const f = opts.fields;
+
+  if (opts.tsv) {
+    console.log("title\turl\tdate");
+    results.results.forEach(r => {
+      const title = (r.title || "N/A").replace(/\t/g, " ");
+      console.log(`${title}\t${r.url}\t${r.publishedDate || ""}`);
+    });
+    return;
+  }
 
   if (opts.compact) {
     results.results.forEach((r, i) => {
