@@ -454,13 +454,21 @@ fn get_max_chars(cli: &Cli) -> usize {
     cli.max_chars.unwrap_or(if cli.compact { 300 } else { 500 })
 }
 
-/// Truncate text to max_chars, appending "..." if truncated
+/// Truncate text at the last sentence boundary within max_chars.
+/// Falls back to last word boundary, then hard cut.
 fn truncate_text(text: &str, max_chars: usize) -> String {
-    if text.len() > max_chars {
-        format!("{}...", &text[..max_chars])
-    } else {
-        text.to_string()
+    if text.len() <= max_chars {
+        return text.to_string();
     }
+    let window = &text[..max_chars];
+    // Find last sentence-ending punctuation followed by space or at end
+    let cut = window.rfind(". ")
+        .or_else(|| window.rfind("? "))
+        .or_else(|| window.rfind("! "))
+        .map(|i| i + 1)  // include the punctuation
+        .or_else(|| window.rfind(' '))  // fallback: last word boundary
+        .unwrap_or(max_chars);          // fallback: hard cut
+    format!("{}...", text[..cut].trim_end())
 }
 
 /// Serialize to JSON — compact (no whitespace) or pretty

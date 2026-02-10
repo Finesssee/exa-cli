@@ -131,6 +131,17 @@ function parseArgs(args) {
   return opts;
 }
 
+function truncateText(text, maxChars) {
+  if (text.length <= maxChars) return text;
+  const window = text.slice(0, maxChars);
+  // Find last sentence boundary, then word boundary, then hard cut
+  let cut = Math.max(window.lastIndexOf(". "), window.lastIndexOf("? "), window.lastIndexOf("! "));
+  if (cut > 0) cut += 1; // include the punctuation
+  else cut = window.lastIndexOf(" ");
+  if (cut <= 0) cut = maxChars;
+  return window.slice(0, cut).trimEnd() + "...";
+}
+
 async function search(exa, opts) {
   const searchOpts = {
     numResults: opts.num,
@@ -166,7 +177,7 @@ async function search(exa, opts) {
       console.log(`[${i + 1}] ${r.title}`);
       console.log(`url: ${r.url}`);
       if (r.publishedDate) console.log(`date: ${r.publishedDate}`);
-      if (r.text) console.log(`content: ${r.text.slice(0, max)}${r.text.length > max ? "..." : ""}`);
+      if (r.text) console.log(`content: ${truncateText(r.text, max)}`);
     });
   } else {
     results.results.forEach((r, i) => {
@@ -178,7 +189,7 @@ async function search(exa, opts) {
       }
       if (r.text) {
         console.log(`${c.green}Content:${c.reset}`);
-        console.log(r.text.slice(0, max) + (r.text.length > max ? "..." : ""));
+        console.log(truncateText(r.text, max));
       }
       console.log();
     });
@@ -207,7 +218,7 @@ async function findSimilar(exa, opts) {
     results.results.forEach((r, i) => {
       console.log(`[${i + 1}] ${r.title}`);
       console.log(`url: ${r.url}`);
-      if (r.text) console.log(`content: ${r.text.slice(0, max)}${r.text.length > max ? "..." : ""}`);
+      if (r.text) console.log(`content: ${truncateText(r.text, max)}`);
     });
   } else {
     results.results.forEach((r, i) => {
@@ -216,7 +227,7 @@ async function findSimilar(exa, opts) {
       console.log(`${c.cyan}Link:${c.reset} ${r.url}`);
       if (r.text) {
         console.log(`${c.green}Content:${c.reset}`);
-        console.log(r.text.slice(0, max) + (r.text.length > max ? "..." : ""));
+        console.log(truncateText(r.text, max));
       }
       console.log();
     });
@@ -242,7 +253,7 @@ async function getContent(exa, opts) {
   if (opts.compact) {
     console.log(r.title);
     console.log(`url: ${r.url}`);
-    console.log(r.text ? r.text.slice(0, max) + (r.text.length > max ? "..." : "") : "");
+    console.log(r.text ? truncateText(r.text, max) : "");
   } else {
     console.log(`${c.bold}Title:${c.reset} ${r.title}`);
     console.log(`${c.cyan}URL:${c.reset} ${r.url}`);
@@ -278,7 +289,7 @@ async function answer(exa, opts) {
       highlights.forEach((h) => console.log(h));
     } else {
       const firstText = results.results[0]?.text;
-      if (firstText) console.log(firstText.slice(0, max) + (firstText.length > max ? "..." : ""));
+      if (firstText) console.log(truncateText(firstText, max));
     }
     if (opts.sources) {
       console.log(`sources: ${results.results.slice(0, 3).map((r) => r.url).join(" | ")}`);
@@ -293,7 +304,7 @@ async function answer(exa, opts) {
     } else {
       const firstText = results.results[0]?.text;
       if (firstText) {
-        console.log(firstText.slice(0, max) + (firstText.length > max ? "..." : ""));
+        console.log(truncateText(firstText, max));
         console.log();
       }
     }
