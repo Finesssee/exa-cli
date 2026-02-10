@@ -1,0 +1,19 @@
+{
+  "name": "exa-cli",
+  "version": "1.0.0",
+  "description": "AI-powered web search and content extraction via Exa API",
+  "main": "exa.js",
+  "type": "module",
+  "bin": {
+    "exa": "./exa.js"
+  },
+  "scripts": {
+    "test": "node exa.js search 'test query'"
+  },
+  "keywords": ["exa", "search", "ai", "cli"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "exa-js": "^1.0.12"
+  }
+}
