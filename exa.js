@@ -78,6 +78,9 @@ function parseArgs(args) {
     schema: null,
     compact: false,
     maxChars: null,
+    fields: null,
+    noCache: false,
+    cacheTtl: 60,
   };
 
   let i = 0;
@@ -114,6 +117,12 @@ function parseArgs(args) {
       opts.compact = true;
     } else if (arg === "--max-chars") {
       opts.maxChars = parseInt(args[++i], 10) || null;
+    } else if (arg === "--fields") {
+      opts.fields = new Set(args[++i].split(",").map(s => s.trim().toLowerCase()));
+    } else if (arg === "--no-cache") {
+      opts.noCache = true;
+    } else if (arg === "--cache-ttl") {
+      opts.cacheTtl = parseInt(args[++i], 10) || 60;
     } else if (!opts.command && ["search", "find", "content", "answer", "research"].includes(arg)) {
       opts.command = arg;
     } else if (!arg.startsWith("-")) {
@@ -134,32 +143,89 @@ function parseArgs(args) {
 function truncateText(text, maxChars) {
   if (text.length <= maxChars) return text;
   const window = text.slice(0, maxChars);
-  // Find last sentence boundary, then word boundary, then hard cut
   let cut = Math.max(window.lastIndexOf(". "), window.lastIndexOf("? "), window.lastIndexOf("! "));
-  if (cut > 0) cut += 1; // include the punctuation
+  if (cut > 0) cut += 1;
   else cut = window.lastIndexOf(" ");
   if (cut <= 0) cut = maxChars;
   return window.slice(0, cut).trimEnd() + "...";
 }
 
+function showField(fields, name) {
+  return !fields || fields.has(name);
+}
+
+// --- Cache helpers ---
+const crypto = require("crypto");
+const path = require("path");
+
+function cacheDir() {
+  const dir = path.join(process.env.APPDATA || process.env.HOME || ".", "exa", "cache");
+  const fs = require("fs");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function cacheKey(parts) {
+  return crypto.createHash("md5").update(parts.join("|")).digest("hex");
+}
+
+function cacheRead(key, ttlMinutes) {
+  const fs = require("fs");
+  const file = path.join(cacheDir(), `${key}.json`);
+  try {
+    const stat = fs.statSync(file);
+    if (Date.now() - stat.mtimeMs > ttlMinutes * 60 * 1000) return null;
+    return fs.readFileSync(file, "utf-8");
+  } catch { return null; }
+}
+
+function cacheWrite(key, data) {
+  const fs = require("fs");
+  const dir = cacheDir();
+  const file = path.join(dir, `${key}.json`);
+  try {
+    fs.writeFileSync(file, data);
+    // LRU eviction: if >50 entries, delete oldest
+    const files = fs.readdirSync(dir)
+      .filter(f => f.endsWith(".json"))
+      .map(f => ({ name: f, mtime: fs.statSync(path.join(dir, f)).mtimeMs }))
+      .sort((a, b) => a.mtime - b.mtime);
+    if (files.length > 50) {
+      files.slice(0, files.length - 50).forEach(f => fs.unlinkSync(path.join(dir, f.name)));
+    }
+  } catch { }
+}
+
 async function search(exa, opts) {
+  const ck = cacheKey(["search", opts.query, String(opts.num), opts.domain || "", opts.after || "", opts.before || ""]);
+
+  if (!opts.noCache) {
+    const cached = cacheRead(ck, opts.cacheTtl);
+    if (cached) {
+      const results = JSON.parse(cached);
+      return printSearchResults(opts, results);
+    }
+  }
+
   const searchOpts = {
     numResults: opts.num,
     contents: opts.content ? { text: true } : undefined,
   };
 
-  if (opts.domain) {
-    searchOpts.includeDomains = [opts.domain];
-  }
-  if (opts.after) {
-    searchOpts.startPublishedDate = opts.after;
-  }
-  if (opts.before) {
-    searchOpts.endPublishedDate = opts.before;
-  }
+  if (opts.domain) searchOpts.includeDomains = [opts.domain];
+  if (opts.after) searchOpts.startPublishedDate = opts.after;
+  if (opts.before) searchOpts.endPublishedDate = opts.before;
 
   const results = await exa.search(opts.query, searchOpts);
 
+  if (!opts.noCache) {
+    cacheWrite(ck, JSON.stringify(results));
+  }
+
+  return printSearchResults(opts, results);
+}
+
+function printSearchResults(opts, results) {
   if (opts.json) {
     console.log(opts.compact ? JSON.stringify(results) : JSON.stringify(results, null, 2));
     return;
@@ -171,23 +237,22 @@ async function search(exa, opts) {
   }
 
   const max = opts.effectiveMaxChars;
+  const f = opts.fields;
 
   if (opts.compact) {
     results.results.forEach((r, i) => {
-      console.log(`[${i + 1}] ${r.title}`);
-      console.log(`url: ${r.url}`);
-      if (r.publishedDate) console.log(`date: ${r.publishedDate}`);
-      if (r.text) console.log(`content: ${truncateText(r.text, max)}`);
+      if (showField(f, "title")) console.log(`[${i + 1}] ${r.title}`);
+      if (showField(f, "url")) console.log(`url: ${r.url}`);
+      if (showField(f, "date") && r.publishedDate) console.log(`date: ${r.publishedDate}`);
+      if (showField(f, "content") && r.text) console.log(`content: ${truncateText(r.text, max)}`);
     });
   } else {
     results.results.forEach((r, i) => {
       console.log(`${c.dim}--- Result ${i + 1} ---${c.reset}`);
-      console.log(`${c.bold}Title:${c.reset} ${r.title}`);
-      console.log(`${c.cyan}Link:${c.reset} ${r.url}`);
-      if (r.publishedDate) {
-        console.log(`${c.dim}Date:${c.reset} ${r.publishedDate}`);
-      }
-      if (r.text) {
+      if (showField(f, "title")) console.log(`${c.bold}Title:${c.reset} ${r.title}`);
+      if (showField(f, "url")) console.log(`${c.cyan}Link:${c.reset} ${r.url}`);
+      if (showField(f, "date") && r.publishedDate) console.log(`${c.dim}Date:${c.reset} ${r.publishedDate}`);
+      if (showField(f, "content") && r.text) {
         console.log(`${c.green}Content:${c.reset}`);
         console.log(truncateText(r.text, max));
       }
@@ -197,45 +262,38 @@ async function search(exa, opts) {
 }
 
 async function findSimilar(exa, opts) {
+  const ck = cacheKey(["find", opts.query, String(opts.num)]);
+
+  if (!opts.noCache) {
+    const cached = cacheRead(ck, opts.cacheTtl);
+    if (cached) return printSearchResults(opts, JSON.parse(cached));
+  }
+
   const results = await exa.findSimilar(opts.query, {
     numResults: opts.num,
     contents: opts.content ? { text: true } : undefined,
   });
 
-  if (opts.json) {
-    console.log(opts.compact ? JSON.stringify(results) : JSON.stringify(results, null, 2));
-    return;
-  }
-
-  if (!results.results || results.results.length === 0) {
-    console.error("No similar results found.");
-    process.exit(3);
-  }
-
-  const max = opts.effectiveMaxChars;
-
-  if (opts.compact) {
-    results.results.forEach((r, i) => {
-      console.log(`[${i + 1}] ${r.title}`);
-      console.log(`url: ${r.url}`);
-      if (r.text) console.log(`content: ${truncateText(r.text, max)}`);
-    });
-  } else {
-    results.results.forEach((r, i) => {
-      console.log(`${c.dim}--- Result ${i + 1} ---${c.reset}`);
-      console.log(`${c.bold}Title:${c.reset} ${r.title}`);
-      console.log(`${c.cyan}Link:${c.reset} ${r.url}`);
-      if (r.text) {
-        console.log(`${c.green}Content:${c.reset}`);
-        console.log(truncateText(r.text, max));
-      }
-      console.log();
-    });
-  }
+  if (!opts.noCache) cacheWrite(ck, JSON.stringify(results));
+  return printSearchResults(opts, results);
 }
 
 async function getContent(exa, opts) {
+  const ck = cacheKey(["content", opts.query]);
+
+  if (!opts.noCache) {
+    const cached = cacheRead(ck, opts.cacheTtl);
+    if (cached) {
+      const results = JSON.parse(cached);
+      if (results.results && results.results[0]) {
+        return printContentResult(opts, results.results[0]);
+      }
+    }
+  }
+
   const results = await exa.getContents([opts.query], { text: true });
+
+  if (!opts.noCache) cacheWrite(ck, JSON.stringify(results));
 
   if (opts.json) {
     console.log(opts.compact ? JSON.stringify(results) : JSON.stringify(results, null, 2));
@@ -247,18 +305,22 @@ async function getContent(exa, opts) {
     process.exit(1);
   }
 
-  const r = results.results[0];
+  printContentResult(opts, results.results[0]);
+}
+
+function printContentResult(opts, r) {
   const max = opts.effectiveMaxChars;
+  const f = opts.fields;
 
   if (opts.compact) {
-    console.log(r.title);
-    console.log(`url: ${r.url}`);
-    console.log(r.text ? truncateText(r.text, max) : "");
+    if (showField(f, "title")) console.log(r.title);
+    if (showField(f, "url")) console.log(`url: ${r.url}`);
+    if (showField(f, "content")) console.log(r.text ? truncateText(r.text, max) : "");
   } else {
-    console.log(`${c.bold}Title:${c.reset} ${r.title}`);
-    console.log(`${c.cyan}URL:${c.reset} ${r.url}`);
+    if (showField(f, "title")) console.log(`${c.bold}Title:${c.reset} ${r.title}`);
+    if (showField(f, "url")) console.log(`${c.cyan}URL:${c.reset} ${r.url}`);
     console.log();
-    console.log(r.text);
+    if (showField(f, "content")) console.log(r.text);
   }
 }
 

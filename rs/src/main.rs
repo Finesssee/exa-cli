@@ -5,8 +5,10 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use key_manager::KeyManager;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::io::IsTerminal;
+use std::path::PathBuf;
 
 const VERSION: &str = "1.1.0";
 
@@ -61,6 +63,18 @@ struct Cli {
     /// Max characters of content per result (default: 300 compact, 500 normal)
     #[arg(long = "max-chars", global = true)]
     max_chars: Option<usize>,
+
+    /// Only output specific fields (comma-separated: title,url,date,content)
+    #[arg(long = "fields", global = true)]
+    fields: Option<String>,
+
+    /// Disable response caching
+    #[arg(long = "no-cache", global = true)]
+    no_cache: bool,
+
+    /// Cache TTL in minutes (default: 60)
+    #[arg(long = "cache-ttl", global = true, default_value = "60")]
+    cache_ttl: u64,
 
     /// Verbose output for debugging
     #[arg(short = 'v', long = "verbose", global = true)]
@@ -480,7 +494,86 @@ fn to_json<T: Serialize>(value: &T, compact: bool) -> Result<String> {
     }
 }
 
+/// Parse --fields into a HashSet. None means "all fields".
+fn parse_fields(cli: &Cli) -> Option<HashSet<String>> {
+    cli.fields.as_ref().map(|f| {
+        f.split(',').map(|s| s.trim().to_lowercase()).collect()
+    })
+}
+
+/// Check if a specific field should be shown
+fn show_field(fields: &Option<HashSet<String>>, name: &str) -> bool {
+    fields.as_ref().map_or(true, |f| f.contains(name))
+}
+
+/// Get cache directory path
+fn cache_dir() -> Result<PathBuf> {
+    let dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("exa")
+        .join("cache");
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Build cache key from command + args
+fn cache_key(parts: &[&str]) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    for p in parts { p.hash(&mut h); }
+    format!("{:016x}", h.finish())
+}
+
+/// Read from cache if fresh (returns None if miss/stale)
+fn cache_read(key: &str, ttl_minutes: u64) -> Option<String> {
+    let path = cache_dir().ok()?.join(format!("{}.json", key));
+    let meta = fs::metadata(&path).ok()?;
+    let age = meta.modified().ok()?
+        .elapsed().ok()?;
+    if age.as_secs() > ttl_minutes * 60 {
+        return None; // stale
+    }
+    fs::read_to_string(&path).ok()
+}
+
+/// Write to cache, evict oldest if >50 entries
+fn cache_write(key: &str, data: &str) {
+    let Ok(dir) = cache_dir() else { return };
+    let path = dir.join(format!("{}.json", key));
+    let _ = fs::write(&path, data);
+    // LRU eviction: if >50 entries, delete oldest
+    if let Ok(entries) = fs::read_dir(&dir) {
+        let mut files: Vec<_> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
+            .filter_map(|e| {
+                let modified = e.metadata().ok()?.modified().ok()?;
+                Some((e.path(), modified))
+            })
+            .collect();
+        if files.len() > 50 {
+            files.sort_by_key(|(_, t)| *t);
+            for (path, _) in files.iter().take(files.len() - 50) {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+}
+
 async fn cmd_search(client: &mut ExaClient, cli: &Cli, query: String) -> Result<()> {
+    let ckey = cache_key(&["search", &query, &cli.num.to_string(),
+        cli.domain.as_deref().unwrap_or(""), cli.after.as_deref().unwrap_or(""),
+        cli.before.as_deref().unwrap_or("")]);
+
+    // Check cache
+    if !cli.no_cache {
+        if let Some(cached) = cache_read(&ckey, cli.cache_ttl) {
+            let results: SearchResponse = serde_json::from_str(&cached)?;
+            return print_search_results(cli, &results);
+        }
+    }
+
     let request = SearchRequest {
         query,
         num_results: cli.num,
@@ -499,8 +592,19 @@ async fn cmd_search(client: &mut ExaClient, cli: &Cli, query: String) -> Result<
 
     let results = client.search(request).await?;
 
+    // Write to cache
+    if !cli.no_cache {
+        if let Ok(data) = serde_json::to_string(&results) {
+            cache_write(&ckey, &data);
+        }
+    }
+
+    print_search_results(cli, &results)
+}
+
+fn print_search_results(cli: &Cli, results: &SearchResponse) -> Result<()> {
     if cli.json {
-        println!("{}", to_json(&results, cli.compact)?);
+        println!("{}", to_json(results, cli.compact)?);
         return Ok(());
     }
 
@@ -510,29 +614,46 @@ async fn cmd_search(client: &mut ExaClient, cli: &Cli, query: String) -> Result<
     }
 
     let max_chars = get_max_chars(cli);
+    let fields = parse_fields(cli);
 
     if cli.compact {
         for (i, r) in results.results.iter().enumerate() {
-            println!("[{}] {}", i + 1, r.title.as_deref().unwrap_or("N/A"));
-            println!("url: {}", r.url);
-            if let Some(date) = &r.published_date {
-                println!("date: {}", date);
+            if show_field(&fields, "title") {
+                println!("[{}] {}", i + 1, r.title.as_deref().unwrap_or("N/A"));
             }
-            if let Some(text) = &r.text {
-                println!("content: {}", truncate_text(text, max_chars));
+            if show_field(&fields, "url") {
+                println!("url: {}", r.url);
+            }
+            if show_field(&fields, "date") {
+                if let Some(date) = &r.published_date {
+                    println!("date: {}", date);
+                }
+            }
+            if show_field(&fields, "content") {
+                if let Some(text) = &r.text {
+                    println!("content: {}", truncate_text(text, max_chars));
+                }
             }
         }
     } else {
         for (i, r) in results.results.iter().enumerate() {
             println!("{}", format!("--- Result {} ---", i + 1).dimmed());
-            println!("{} {}", "Title:".bold(), r.title.as_deref().unwrap_or("N/A"));
-            println!("{} {}", "Link:".cyan(), r.url);
-            if let Some(date) = &r.published_date {
-                println!("{} {}", "Date:".dimmed(), date);
+            if show_field(&fields, "title") {
+                println!("{} {}", "Title:".bold(), r.title.as_deref().unwrap_or("N/A"));
             }
-            if let Some(text) = &r.text {
-                println!("{}", "Content:".green());
-                println!("{}", truncate_text(text, max_chars));
+            if show_field(&fields, "url") {
+                println!("{} {}", "Link:".cyan(), r.url);
+            }
+            if show_field(&fields, "date") {
+                if let Some(date) = &r.published_date {
+                    println!("{} {}", "Date:".dimmed(), date);
+                }
+            }
+            if show_field(&fields, "content") {
+                if let Some(text) = &r.text {
+                    println!("{}", "Content:".green());
+                    println!("{}", truncate_text(text, max_chars));
+                }
             }
             println!();
         }
@@ -542,6 +663,15 @@ async fn cmd_search(client: &mut ExaClient, cli: &Cli, query: String) -> Result<
 }
 
 async fn cmd_find(client: &mut ExaClient, cli: &Cli, query: String) -> Result<()> {
+    let ckey = cache_key(&["find", &query, &cli.num.to_string()]);
+
+    if !cli.no_cache {
+        if let Some(cached) = cache_read(&ckey, cli.cache_ttl) {
+            let results: SearchResponse = serde_json::from_str(&cached)?;
+            return print_search_results(cli, &results);
+        }
+    }
+
     let request = FindSimilarRequest {
         url: query,
         num_results: cli.num,
@@ -557,44 +687,34 @@ async fn cmd_find(client: &mut ExaClient, cli: &Cli, query: String) -> Result<()
 
     let results = client.find_similar(request).await?;
 
-    if cli.json {
-        println!("{}", to_json(&results, cli.compact)?);
-        return Ok(());
-    }
-
-    if results.results.is_empty() {
-        eprintln!("No similar results found.");
-        std::process::exit(3);
-    }
-
-    let max_chars = get_max_chars(cli);
-
-    if cli.compact {
-        for (i, r) in results.results.iter().enumerate() {
-            println!("[{}] {}", i + 1, r.title.as_deref().unwrap_or("N/A"));
-            println!("url: {}", r.url);
-            if let Some(text) = &r.text {
-                println!("content: {}", truncate_text(text, max_chars));
-            }
-        }
-    } else {
-        for (i, r) in results.results.iter().enumerate() {
-            println!("{}", format!("--- Result {} ---", i + 1).dimmed());
-            println!("{} {}", "Title:".bold(), r.title.as_deref().unwrap_or("N/A"));
-            println!("{} {}", "Link:".cyan(), r.url);
-            if let Some(text) = &r.text {
-                println!("{}", "Content:".green());
-                println!("{}", truncate_text(text, max_chars));
-            }
-            println!();
+    if !cli.no_cache {
+        if let Ok(data) = serde_json::to_string(&results) {
+            cache_write(&ckey, &data);
         }
     }
 
-    Ok(())
+    print_search_results(cli, &results)
 }
 
 async fn cmd_content(client: &mut ExaClient, cli: &Cli, url: String) -> Result<()> {
+    let ckey = cache_key(&["content", &url]);
+
+    if !cli.no_cache {
+        if let Some(cached) = cache_read(&ckey, cli.cache_ttl) {
+            let results: SearchResponse = serde_json::from_str(&cached)?;
+            if let Some(r) = results.results.first() {
+                return print_content_result(cli, r);
+            }
+        }
+    }
+
     let results = client.get_contents(vec![url]).await?;
+
+    if !cli.no_cache {
+        if let Ok(data) = serde_json::to_string(&results) {
+            cache_write(&ckey, &data);
+        }
+    }
 
     if cli.json {
         println!("{}", to_json(&results, cli.compact)?);
@@ -606,21 +726,37 @@ async fn cmd_content(client: &mut ExaClient, cli: &Cli, url: String) -> Result<(
         std::process::exit(1);
     }
 
-    let r = &results.results[0];
+    print_content_result(cli, &results.results[0])
+}
+
+fn print_content_result(cli: &Cli, r: &SearchResult) -> Result<()> {
     let max_chars = get_max_chars(cli);
+    let fields = parse_fields(cli);
 
     if cli.compact {
-        println!("{}", r.title.as_deref().unwrap_or("N/A"));
-        println!("url: {}", r.url);
-        if let Some(text) = &r.text {
-            println!("{}", truncate_text(text, max_chars));
+        if show_field(&fields, "title") {
+            println!("{}", r.title.as_deref().unwrap_or("N/A"));
+        }
+        if show_field(&fields, "url") {
+            println!("url: {}", r.url);
+        }
+        if show_field(&fields, "content") {
+            if let Some(text) = &r.text {
+                println!("{}", truncate_text(text, max_chars));
+            }
         }
     } else {
-        println!("{} {}", "Title:".bold(), r.title.as_deref().unwrap_or("N/A"));
-        println!("{} {}", "URL:".cyan(), r.url);
+        if show_field(&fields, "title") {
+            println!("{} {}", "Title:".bold(), r.title.as_deref().unwrap_or("N/A"));
+        }
+        if show_field(&fields, "url") {
+            println!("{} {}", "URL:".cyan(), r.url);
+        }
         println!();
-        if let Some(text) = &r.text {
-            println!("{}", text);
+        if show_field(&fields, "content") {
+            if let Some(text) = &r.text {
+                println!("{}", text);
+            }
         }
     }
 
