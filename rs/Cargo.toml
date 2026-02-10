@@ -1,10 +1,17 @@
 [package]
-name = "exa"
+name = "exa-cli"
 version = "1.1.0"
 edition = "2021"
-description = "AI-powered web search via Exa API"
+description = "AI-powered web search, content extraction, and deep research via Exa API"
 license = "MIT"
-repository = "https://github.com/Finesssee/exa-cli-rs"
+repository = "https://github.com/Finesssee/exa-cli"
+readme = "../README.md"
+keywords = ["exa", "search", "ai", "cli", "web"]
+categories = ["command-line-utilities", "web-programming"]
+
+[[bin]]
+name = "exa"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

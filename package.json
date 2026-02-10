@@ -1,19 +1,33 @@
 {
   "name": "exa-cli",
-  "version": "1.0.0",
-  "description": "AI-powered web search and content extraction via Exa API",
+  "version": "1.1.0",
+  "description": "AI-powered web search, content extraction, and deep research via Exa API",
   "main": "exa.js",
   "type": "module",
   "bin": {
     "exa": "./exa.js"
   },
   "scripts": {
-    "test": "node exa.js search 'test query'"
+    "test": "node exa.js --help"
   },
-  "keywords": ["exa", "search", "ai", "cli"],
-  "author": "",
+  "keywords": [
+    "exa",
+    "search",
+    "ai",
+    "cli",
+    "web",
+    "research"
+  ],
+  "author": "Finesssee",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Finesssee/exa-cli"
+  },
   "dependencies": {
     "exa-js": "^1.0.12"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
