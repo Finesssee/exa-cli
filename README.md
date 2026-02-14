@@ -63,6 +63,22 @@ exa answer "what is WebAssembly" --compact
 # Deep research
 exa research "compare React vs Svelte in 2025" --compact
 
+# Search types (instant is default — sub-150ms)
+exa search "query" --type auto       # highest quality
+exa search "query" --type fast       # balanced speed/quality
+exa search "topic" --type deep       # comprehensive research
+
+# Category filters
+exa search "AI startups" --category company
+exa search "Elon Musk" --category people
+
+# Highlights (token-efficient excerpts)
+exa search "react hooks" --highlights 3000
+
+# Content freshness
+exa search "breaking news" --max-age 1
+exa search "historical data" --max-age -1   # cache only
+
 # JSON output
 exa search "query" --json --compact
 ```
@@ -77,6 +93,11 @@ exa search "query" --json --compact
 | `--max-chars <n>` | Content truncation limit (default: 300 compact, 500 normal) |
 | `-n <num>` | Number of results (default: 5) |
 | `--content` | Include page text in search/find results |
+| `--highlights [n]` | Key excerpts instead of full text (max chars, default: 2000) |
+| `--type <t>` | Search type: `instant` (default, sub-150ms), `auto`, `fast`, `deep`, `neural` |
+| `--category <c>` | Content category: `company`, `people`, `tweet`, `news`, `research paper` |
+| `--max-age <hrs>` | Max content age in hours (`0`=always live, `-1`=cache only) |
+| `--verbosity <v>` | Content verbosity: `compact`, `standard`, `full` |
 | `--json` | JSON output (single-line with `--compact`) |
 | `--domain <d>` | Restrict to domain |
 | `--after <date>` | Published after YYYY-MM-DD |
