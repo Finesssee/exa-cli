@@ -10,7 +10,7 @@ use std::fs;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
-const VERSION: &str = "1.1.0";
+const VERSION: &str = "1.3.0";
 
 #[derive(Parser)]
 #[command(name = "exa")]
@@ -83,6 +83,26 @@ struct Cli {
     /// Verbose output for debugging
     #[arg(short = 'v', long = "verbose", global = true)]
     verbose: bool,
+
+    /// Search type: instant (default, sub-150ms), auto, fast, deep, neural
+    #[arg(long = "type", global = true, default_value = "instant")]
+    search_type: String,
+
+    /// Content category filter: company, people, tweet, news, research paper, personal site, financial report
+    #[arg(long = "category", global = true)]
+    category: Option<String>,
+
+    /// Max content age in hours (0=always live, -1=cache only)
+    #[arg(long = "max-age", global = true)]
+    max_age: Option<i64>,
+
+    /// Key excerpts instead of full text (max chars, default: 2000)
+    #[arg(long = "highlights", global = true, num_args = 0..=1, default_missing_value = "2000")]
+    highlights: Option<usize>,
+
+    /// Content verbosity: compact, standard, full
+    #[arg(long = "verbosity", global = true)]
+    verbosity: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -134,13 +154,28 @@ struct SearchRequest {
     start_published_date: Option<String>,
     #[serde(rename = "endPublishedDate", skip_serializing_if = "Option::is_none")]
     end_published_date: Option<String>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    search_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    category: Option<String>,
+    #[serde(rename = "maxAgeHours", skip_serializing_if = "Option::is_none")]
+    max_age_hours: Option<i64>,
 }
 
 #[derive(Serialize)]
 struct ContentsConfig {
-    text: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    highlights: Option<bool>,
+    text: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    highlights: Option<HighlightsConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verbosity: Option<String>,
+}
+
+#[derive(Serialize)]
+struct HighlightsConfig {
+    #[serde(rename = "maxCharacters")]
+    max_characters: usize,
 }
 
 #[derive(Serialize)]
@@ -150,6 +185,12 @@ struct FindSimilarRequest {
     num_results: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     contents: Option<ContentsConfig>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    search_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    category: Option<String>,
+    #[serde(rename = "maxAgeHours", skip_serializing_if = "Option::is_none")]
+    max_age_hours: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -510,6 +551,27 @@ fn show_field(fields: &Option<HashSet<String>>, name: &str) -> bool {
     fields.as_ref().map_or(true, |f| f.contains(name))
 }
 
+/// Build ContentsConfig from CLI flags (--content, --highlights, --verbosity)
+fn build_contents(cli: &Cli) -> Option<ContentsConfig> {
+    if cli.highlights.is_some() {
+        Some(ContentsConfig {
+            text: None,
+            highlights: Some(HighlightsConfig {
+                max_characters: cli.highlights.unwrap(),
+            }),
+            verbosity: cli.verbosity.clone(),
+        })
+    } else if cli.content {
+        Some(ContentsConfig {
+            text: Some(true),
+            highlights: None,
+            verbosity: cli.verbosity.clone(),
+        })
+    } else {
+        None
+    }
+}
+
 /// Get cache directory path
 fn cache_dir() -> Result<PathBuf> {
     let dir = dirs::config_dir()
@@ -566,32 +628,32 @@ fn cache_write(key: &str, data: &str) {
 }
 
 async fn cmd_search(client: &mut ExaClient, cli: &Cli, query: String) -> Result<()> {
+    let max_age_str = cli.max_age.map(|v| v.to_string()).unwrap_or_default();
+    let highlights_str = cli.highlights.map(|v| v.to_string()).unwrap_or_default();
     let ckey = cache_key(&["search", &query, &cli.num.to_string(),
         cli.domain.as_deref().unwrap_or(""), cli.after.as_deref().unwrap_or(""),
-        cli.before.as_deref().unwrap_or("")]);
+        cli.before.as_deref().unwrap_or(""), &cli.search_type,
+        cli.category.as_deref().unwrap_or(""), &max_age_str, &highlights_str]);
 
     // Check cache
     if !cli.no_cache {
         if let Some(cached) = cache_read(&ckey, cli.cache_ttl) {
-            let results: SearchResponse = serde_json::from_str(&cached)?;
-            return print_search_results(cli, &results);
+            if let Ok(results) = serde_json::from_str::<SearchResponse>(&cached) {
+                return print_search_results(cli, &results);
+            }
         }
     }
 
     let request = SearchRequest {
         query,
         num_results: cli.num,
-        contents: if cli.content {
-            Some(ContentsConfig {
-                text: true,
-                highlights: None,
-            })
-        } else {
-            None
-        },
+        contents: build_contents(cli),
         include_domains: cli.domain.as_ref().map(|d| vec![d.clone()]),
         start_published_date: cli.after.clone(),
         end_published_date: cli.before.clone(),
+        search_type: Some(cli.search_type.clone()),
+        category: cli.category.clone(),
+        max_age_hours: cli.max_age,
     };
 
     let results = client.search(request).await?;
@@ -648,6 +710,11 @@ fn print_search_results(cli: &Cli, results: &SearchResponse) -> Result<()> {
                 if let Some(text) = &r.text {
                     println!("content: {}", truncate_text(text, max_chars));
                 }
+                if let Some(highlights) = &r.highlights {
+                    for h in highlights {
+                        println!("highlight: {}", h);
+                    }
+                }
             }
         }
     } else {
@@ -669,6 +736,12 @@ fn print_search_results(cli: &Cli, results: &SearchResponse) -> Result<()> {
                     println!("{}", "Content:".green());
                     println!("{}", truncate_text(text, max_chars));
                 }
+                if let Some(highlights) = &r.highlights {
+                    println!("{}", "Highlights:".yellow());
+                    for h in highlights {
+                        println!("  {}", h);
+                    }
+                }
             }
             println!();
         }
@@ -678,26 +751,23 @@ fn print_search_results(cli: &Cli, results: &SearchResponse) -> Result<()> {
 }
 
 async fn cmd_find(client: &mut ExaClient, cli: &Cli, query: String) -> Result<()> {
-    let ckey = cache_key(&["find", &query, &cli.num.to_string()]);
+    let ckey = cache_key(&["find", &query, &cli.num.to_string(), &cli.search_type]);
 
     if !cli.no_cache {
         if let Some(cached) = cache_read(&ckey, cli.cache_ttl) {
-            let results: SearchResponse = serde_json::from_str(&cached)?;
-            return print_search_results(cli, &results);
+            if let Ok(results) = serde_json::from_str::<SearchResponse>(&cached) {
+                return print_search_results(cli, &results);
+            }
         }
     }
 
     let request = FindSimilarRequest {
         url: query,
         num_results: cli.num,
-        contents: if cli.content {
-            Some(ContentsConfig {
-                text: true,
-                highlights: None,
-            })
-        } else {
-            None
-        },
+        contents: build_contents(cli),
+        search_type: Some(cli.search_type.clone()),
+        category: cli.category.clone(),
+        max_age_hours: cli.max_age,
     };
 
     let results = client.find_similar(request).await?;
@@ -716,9 +786,10 @@ async fn cmd_content(client: &mut ExaClient, cli: &Cli, url: String) -> Result<(
 
     if !cli.no_cache {
         if let Some(cached) = cache_read(&ckey, cli.cache_ttl) {
-            let results: SearchResponse = serde_json::from_str(&cached)?;
-            if let Some(r) = results.results.first() {
-                return print_content_result(cli, r);
+            if let Ok(results) = serde_json::from_str::<SearchResponse>(&cached) {
+                if let Some(r) = results.results.first() {
+                    return print_content_result(cli, r);
+                }
             }
         }
     }
@@ -783,12 +854,16 @@ async fn cmd_answer(client: &mut ExaClient, cli: &Cli, query: String) -> Result<
         query,
         num_results: 5,
         contents: Some(ContentsConfig {
-            text: true,
-            highlights: Some(true),
+            text: Some(true),
+            highlights: Some(HighlightsConfig { max_characters: 2000 }),
+            verbosity: cli.verbosity.clone(),
         }),
         include_domains: None,
         start_published_date: None,
         end_published_date: None,
+        search_type: Some(cli.search_type.clone()),
+        category: None,
+        max_age_hours: None,
     };
 
     let results = client.search(request).await?;
@@ -862,9 +937,9 @@ async fn cmd_research(client: &mut ExaClient, cli: &Cli, query: String) -> Resul
     };
 
     let model = if cli.model == "exa-research-pro" {
-        "exa-research"
+        "exa-research-pro"
     } else {
-        "exa-research-fast"
+        "exa-research"
     };
 
     let request = ResearchCreateRequest {
