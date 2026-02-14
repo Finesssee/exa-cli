@@ -1,13 +1,21 @@
 ---
 name: exa-cli
-description: AI-powered web search, content extraction, and deep research via Exa API. Always use --compact flag to minimize token usage.
+description: AI-powered web search and content extraction via Exa API. Use for web searches, documentation lookup, semantic/conceptual searches, extracting page content, getting AI answers with sources, or deep multi-step research tasks. Triggers on requests like "search for X", "find documentation about Y", "research Z", "what is X", or any web search need.
 ---
 
 # Exa CLI
 
-Needs env: `EXA_API_KEY`
+AI-powered web search with automatic API key rotation. Rust binary, ~57ms cached / ~570ms live.
 
 **Always use `--compact` when calling from an AI agent.** Piped output auto-enables compact mode.
+
+## Environment
+
+| Variable | Description |
+|----------|-------------|
+| `EXA_API_KEYS` | Comma-separated API keys (recommended) |
+| `EXA_API_KEY` | Single key (fallback) |
+| `EXA_LOG_REQUESTS` | Set to `1` to enable logging |
 
 ## Commands
 
@@ -16,13 +24,16 @@ exa search "query" --compact -n 3              # Web search (instant type, sub-1
 exa search "query" --compact --fields url      # Only URLs (minimal tokens)
 exa search "query" --tsv -n 5                  # Tab-separated output
 exa search "query" --type auto --compact       # Highest quality search
+exa search "query" --type deep --compact       # Comprehensive research
 exa search "AI startups" --category company    # Category-filtered search
 exa search "news" --highlights --compact       # Token-efficient excerpts
-exa search "breaking" --max-age 1 --compact    # Fresh content only
+exa search "breaking" --max-age 1 --compact    # Fresh content only (hours)
 exa find "similar to this" --compact           # Semantic similarity
 exa content https://example.com --compact      # Extract page content
 exa answer "what is X" --compact               # AI answer with sources
 exa research "compare X vs Y" --compact        # Deep async research
+exa research "topic" --model exa-research-pro  # Thorough research model
+exa research "list items" --schema schema.json # Structured output
 ```
 
 ## Key Flags
@@ -45,3 +56,18 @@ exa research "compare X vs Y" --compact        # Deep async research
 - `--cache-ttl <min>` — Cache TTL in minutes (default: 60)
 - `--model exa-research-pro` — Thorough research model
 - `--schema <file>` — Structured research output
+
+## Key Management
+
+```bash
+exa status    # Show keys, cooldowns, usage stats
+exa reset     # Clear cooldowns and statistics
+```
+
+## Key Rotation
+
+- Round-robin across multiple keys
+- Auto-retry on 429 (up to 3 times)
+- Respects Retry-After headers
+- Waits if all keys exhausted
+- State persists in config dir
