@@ -25,7 +25,7 @@
     "url": "https://github.com/Finesssee/exa-cli"
   },
   "dependencies": {
-    "exa-js": "^1.0.12"
+    "exa-js": "^2.4.0"
   },
   "engines": {
     "node": ">=18"
