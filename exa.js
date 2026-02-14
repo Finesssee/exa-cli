@@ -1,8 +1,12 @@
 #!/usr/bin/env node
 
 import Exa from "exa-js";
+import crypto from "crypto";
+import path from "path";
+import fs from "fs";
+import os from "os";
 
-const VERSION = "1.1.0";
+const VERSION = "1.3.0";
 
 // Colors (respects NO_COLOR)
 const useColor = !process.env.NO_COLOR && process.stdout.isTTY;
@@ -29,6 +33,7 @@ ${c.bold}COMMANDS${c.reset}
   content <url>      Extract content from URL
   answer <query>     Get AI answer with sources
   research <query>   Deep AI research (async, multi-step)
+  status             Show API key status and usage stats
 
 ${c.bold}OPTIONS${c.reset}
   -h, --help         Show this help
@@ -40,16 +45,29 @@ ${c.bold}OPTIONS${c.reset}
   --before <date>    Results before YYYY-MM-DD
   --json             Output as JSON
   --no-color         Disable colors
+  --type <t>         Search type: instant (default), auto, fast, deep, neural
+  --category <c>     Content category: company, people, tweet, news, research paper
+  --max-age <hrs>    Max content age in hours (0=always live, -1=cache only)
+  --highlights [n]   Return key excerpts instead of full text (max chars, default: 2000)
+  --verbosity <v>    Content verbosity: compact, standard, full
   --model <m>        Research model (exa-research, exa-research-pro)
   --schema <file>    JSON schema file for structured research output
 
 ${c.bold}ENVIRONMENT${c.reset}
-  EXA_API_KEY        Required. Your Exa API key.
+  EXA_API_KEY        Your Exa API key (single key).
+  EXA_API_KEYS       Comma-separated keys for round-robin rotation.
 
 ${c.bold}EXAMPLES${c.reset}
   exa search "rust async patterns"
   exa search "react hooks" -n 10 --content
   exa search "news" --domain nytimes.com --after 2025-01-01
+  exa search "fast query" --type fast
+  exa search "deep topic" --type deep
+  exa search "real-time query" --type instant
+  exa search "AI startups" --category company
+  exa search "breaking news" --max-age 1
+  exa search "react hooks" --highlights 3000
+  exa search "rust async" --content --verbosity compact
   exa find "clean code principles"
   exa content https://example.com/article
   exa answer "what is kubernetes"
@@ -75,6 +93,11 @@ function parseArgs(args) {
     summary: false,
     sources: true,
     model: "exa-research",
+    type: "instant",
+    category: null,
+    maxAge: null,
+    highlights: null,
+    verbosity: null,
     schema: null,
     compact: false,
     maxChars: null,
@@ -112,6 +135,22 @@ function parseArgs(args) {
       opts.sources = false;
     } else if (arg === "--model") {
       opts.model = args[++i];
+    } else if (arg === "--type") {
+      opts.type = args[++i];
+    } else if (arg === "--category") {
+      opts.category = args[++i];
+    } else if (arg === "--max-age") {
+      opts.maxAge = parseInt(args[++i], 10);
+    } else if (arg === "--highlights") {
+      const next = args[i + 1];
+      if (next && !next.startsWith("-")) {
+        opts.highlights = parseInt(next, 10) || 2000;
+        i++;
+      } else {
+        opts.highlights = 2000;
+      }
+    } else if (arg === "--verbosity") {
+      opts.verbosity = args[++i];
     } else if (arg === "--schema") {
       opts.schema = args[++i];
     } else if (arg === "--compact") {
@@ -126,7 +165,7 @@ function parseArgs(args) {
       opts.cacheTtl = parseInt(args[++i], 10) || 60;
     } else if (arg === "--tsv") {
       opts.tsv = true;
-    } else if (!opts.command && ["search", "find", "content", "answer", "research"].includes(arg)) {
+    } else if (!opts.command && ["search", "find", "content", "answer", "research", "status"].includes(arg)) {
       opts.command = arg;
     } else if (!arg.startsWith("-")) {
       opts.query.push(arg);
@@ -158,12 +197,15 @@ function showField(fields, name) {
 }
 
 // --- Cache helpers ---
-const crypto = require("crypto");
-const path = require("path");
+
+function configDir() {
+  const dir = path.join(process.env.APPDATA || (process.env.HOME || os.homedir()), ".config", "exa");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
 
 function cacheDir() {
-  const dir = path.join(process.env.APPDATA || process.env.HOME || ".", "exa", "cache");
-  const fs = require("fs");
+  const dir = path.join(configDir(), "cache");
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -173,7 +215,6 @@ function cacheKey(parts) {
 }
 
 function cacheRead(key, ttlMinutes) {
-  const fs = require("fs");
   const file = path.join(cacheDir(), `${key}.json`);
   try {
     const stat = fs.statSync(file);
@@ -183,7 +224,6 @@ function cacheRead(key, ttlMinutes) {
 }
 
 function cacheWrite(key, data) {
-  const fs = require("fs");
   const dir = cacheDir();
   const file = path.join(dir, `${key}.json`);
   try {
@@ -199,8 +239,154 @@ function cacheWrite(key, data) {
   } catch { }
 }
 
+// --- Key Manager (round-robin with cooldown + usage tracking) ---
+
+const DEFAULT_COOLDOWN_MS = 60_000;
+
+function maskKey(key) {
+  return key.length <= 3 ? "***" : `...${key.slice(-3)}`;
+}
+
+function loadKeysFromEnv() {
+  const multi = (process.env.EXA_API_KEYS || "").trim();
+  if (multi) {
+    const keys = multi.split(",").map(s => s.trim()).filter(Boolean);
+    if (keys.length > 0) return keys;
+  }
+  const single = (process.env.EXA_API_KEY || "").trim();
+  if (single) return [single];
+  return null;
+}
+
+function stateFilePath() {
+  return path.join(configDir(), "state.json");
+}
+
+function loadKeyState() {
+  try {
+    const raw = fs.readFileSync(stateFilePath(), "utf-8");
+    return JSON.parse(raw);
+  } catch {
+    return { version: 1, currentIndex: 0, lastValidated: Date.now(), keys: {} };
+  }
+}
+
+function saveKeyState(state) {
+  try { fs.writeFileSync(stateFilePath(), JSON.stringify(state, null, 2)); } catch {}
+}
+
+function getNextKey(keys, state) {
+  const now = Date.now();
+
+  // Ensure all keys have entries
+  for (let i = 0; i < keys.length; i++) {
+    if (!state.keys[i]) {
+      state.keys[i] = { valid: true, cooldownUntil: null, requests: 0, success: 0, errors: 0 };
+    }
+  }
+
+  // Filter valid keys
+  const validIndices = [];
+  for (let i = 0; i < keys.length; i++) {
+    if (state.keys[i].valid !== false) validIndices.push(i);
+  }
+  if (validIndices.length === 0) return null;
+
+  // Filter keys not on cooldown
+  const available = validIndices.filter(i => {
+    const cd = state.keys[i].cooldownUntil;
+    return !cd || now >= cd;
+  });
+
+  let selected;
+  if (available.length === 0) {
+    // All on cooldown — pick the one expiring soonest
+    selected = validIndices.reduce((best, i) => {
+      const cd = state.keys[i].cooldownUntil || 0;
+      const bestCd = state.keys[best].cooldownUntil || 0;
+      return cd < bestCd ? i : best;
+    });
+    const wait = Math.max(0, (state.keys[selected].cooldownUntil || 0) - now);
+    if (wait > 0) {
+      // For CLI, just pick it — the slight wait is acceptable
+    }
+  } else {
+    // Round-robin with usage balancing: start from currentIndex, pick lowest usage
+    const start = (state.currentIndex || 0) % keys.length;
+    let bestIdx = available[0];
+    let bestUsage = Infinity;
+    for (let offset = 0; offset < keys.length; offset++) {
+      const idx = (start + offset) % keys.length;
+      if (available.includes(idx)) {
+        const usage = state.keys[idx].requests || 0;
+        if (usage < bestUsage) {
+          bestUsage = usage;
+          bestIdx = idx;
+        }
+      }
+    }
+    selected = bestIdx;
+  }
+
+  state.currentIndex = (selected + 1) % keys.length;
+  return selected;
+}
+
+function recordSuccess(state, idx) {
+  const k = state.keys[idx];
+  if (!k) return;
+  k.requests = (k.requests || 0) + 1;
+  k.success = (k.success || 0) + 1;
+  k.cooldownUntil = null;
+}
+
+function recordRateLimit(state, idx, retryAfterMs) {
+  const k = state.keys[idx];
+  if (!k) return;
+  k.errors = (k.errors || 0) + 1;
+  k.cooldownUntil = Date.now() + (retryAfterMs || DEFAULT_COOLDOWN_MS);
+}
+
+function printKeyStatus(keys, state) {
+  const now = Date.now();
+  console.log(`${c.bold}Exa API Key Status${c.reset}`);
+  console.log("=".repeat(50));
+  console.log(`${c.bold}Total Keys:${c.reset} ${keys.length}`);
+  console.log(`${c.bold}Next Index:${c.reset} ${(state.currentIndex || 0) % keys.length}`);
+  console.log();
+  for (let i = 0; i < keys.length; i++) {
+    const info = state.keys[i] || { valid: true, requests: 0, success: 0, errors: 0 };
+    const masked = maskKey(keys[i]);
+    let status;
+    if (info.valid === false) {
+      status = `${c.red}INVALID${c.reset}`;
+    } else if (info.cooldownUntil && now < info.cooldownUntil) {
+      const remaining = Math.ceil((info.cooldownUntil - now) / 1000);
+      status = `${c.yellow}COOLDOWN (${remaining}s)${c.reset}`;
+    } else {
+      status = `${c.green}READY${c.reset}`;
+    }
+    console.log(`Key ${i}: ${c.cyan}${masked}${c.reset} - ${status}`);
+    console.log(`  Requests: ${info.requests || 0} | Success: ${info.success || 0} | Errors: ${info.errors || 0}`);
+  }
+}
+
+function buildContentsOpt(opts) {
+  if (opts.highlights != null) {
+    const contentsObj = { highlights: { maxCharacters: opts.highlights } };
+    if (opts.verbosity) contentsObj.verbosity = opts.verbosity;
+    return contentsObj;
+  }
+  if (opts.content) {
+    const contentsObj = { text: true };
+    if (opts.verbosity) contentsObj.verbosity = opts.verbosity;
+    return contentsObj;
+  }
+  return undefined;
+}
+
 async function search(exa, opts) {
-  const ck = cacheKey(["search", opts.query, String(opts.num), opts.domain || "", opts.after || "", opts.before || ""]);
+  const ck = cacheKey(["search", opts.query, String(opts.num), opts.type, opts.category || "", opts.domain || "", opts.after || "", opts.before || "", String(opts.maxAge ?? ""), String(opts.highlights ?? ""), opts.verbosity || ""]);
 
   if (!opts.noCache) {
     const cached = cacheRead(ck, opts.cacheTtl);
@@ -212,12 +398,15 @@ async function search(exa, opts) {
 
   const searchOpts = {
     numResults: opts.num,
-    contents: opts.content ? { text: true } : undefined,
+    type: opts.type,
+    contents: buildContentsOpt(opts),
   };
 
   if (opts.domain) searchOpts.includeDomains = [opts.domain];
   if (opts.after) searchOpts.startPublishedDate = opts.after;
   if (opts.before) searchOpts.endPublishedDate = opts.before;
+  if (opts.category) searchOpts.category = opts.category;
+  if (opts.maxAge != null) searchOpts.maxAgeHours = opts.maxAge;
 
   const results = await exa.search(opts.query, searchOpts);
 
@@ -257,6 +446,9 @@ function printSearchResults(opts, results) {
       if (showField(f, "url")) console.log(`url: ${r.url}`);
       if (showField(f, "date") && r.publishedDate) console.log(`date: ${r.publishedDate}`);
       if (showField(f, "content") && r.text) console.log(`content: ${truncateText(r.text, max)}`);
+      if (showField(f, "highlights") && r.highlights && r.highlights.length > 0) {
+        r.highlights.forEach(h => console.log(`highlight: ${h}`));
+      }
     });
   } else {
     results.results.forEach((r, i) => {
@@ -268,13 +460,17 @@ function printSearchResults(opts, results) {
         console.log(`${c.green}Content:${c.reset}`);
         console.log(truncateText(r.text, max));
       }
+      if (showField(f, "highlights") && r.highlights && r.highlights.length > 0) {
+        console.log(`${c.yellow}Highlights:${c.reset}`);
+        r.highlights.forEach(h => console.log(`  ${h}`));
+      }
       console.log();
     });
   }
 }
 
 async function findSimilar(exa, opts) {
-  const ck = cacheKey(["find", opts.query, String(opts.num)]);
+  const ck = cacheKey(["find", opts.query, String(opts.num), opts.type]);
 
   if (!opts.noCache) {
     const cached = cacheRead(ck, opts.cacheTtl);
@@ -283,7 +479,8 @@ async function findSimilar(exa, opts) {
 
   const results = await exa.findSimilar(opts.query, {
     numResults: opts.num,
-    contents: opts.content ? { text: true } : undefined,
+    type: opts.type,
+    contents: buildContentsOpt(opts),
   });
 
   if (!opts.noCache) cacheWrite(ck, JSON.stringify(results));
@@ -339,6 +536,7 @@ function printContentResult(opts, r) {
 async function answer(exa, opts) {
   const results = await exa.search(opts.query, {
     numResults: 5,
+    type: opts.type,
     contents: { text: true, highlights: true },
   });
 
@@ -393,8 +591,6 @@ async function answer(exa, opts) {
 }
 
 async function research(exa, opts) {
-  const fs = await import("fs");
-
   const researchOpts = {
     instructions: opts.query,
     model: opts.model === "exa-research-pro" ? "exa-research" : "exa-research-fast",
@@ -494,11 +690,19 @@ async function main() {
     process.exit(0);
   }
 
-  const apiKey = process.env.EXA_API_KEY;
-  if (!apiKey) {
-    console.error(`${c.red}Error:${c.reset} EXA_API_KEY environment variable is required.`);
+  const keys = loadKeysFromEnv();
+  if (!keys) {
+    console.error(`${c.red}Error:${c.reset} No API key found.`);
+    console.error(`Set EXA_API_KEY or EXA_API_KEYS (comma-separated).`);
     console.error(`Get your key at: https://exa.ai`);
     process.exit(2);
+  }
+
+  const state = loadKeyState();
+
+  if (opts.command === "status") {
+    printKeyStatus(keys, state);
+    process.exit(0);
   }
 
   if (!opts.command) {
@@ -512,6 +716,13 @@ async function main() {
     process.exit(2);
   }
 
+  const keyIdx = getNextKey(keys, state);
+  if (keyIdx === null) {
+    console.error(`${c.red}Error:${c.reset} No valid API keys available.`);
+    process.exit(2);
+  }
+
+  const apiKey = keys[keyIdx];
   const exa = new Exa(apiKey);
 
   try {
@@ -535,7 +746,38 @@ async function main() {
         console.error(`${c.red}Unknown command:${c.reset} ${opts.command}`);
         process.exit(2);
     }
+    recordSuccess(state, keyIdx);
+    saveKeyState(state);
   } catch (err) {
+    // Check if rate limited (429)
+    if (err.status === 429 || (err.message && err.message.includes("429"))) {
+      recordRateLimit(state, keyIdx);
+      saveKeyState(state);
+      // If we have more keys, retry with next one
+      if (keys.length > 1) {
+        const retryIdx = getNextKey(keys, state);
+        if (retryIdx !== null && retryIdx !== keyIdx) {
+          const retryExa = new Exa(keys[retryIdx]);
+          try {
+            switch (opts.command) {
+              case "search": await search(retryExa, opts); break;
+              case "find": await findSimilar(retryExa, opts); break;
+              case "content": await getContent(retryExa, opts); break;
+              case "answer": await answer(retryExa, opts); break;
+              case "research": await research(retryExa, opts); break;
+            }
+            recordSuccess(state, retryIdx);
+            saveKeyState(state);
+            return;
+          } catch (retryErr) {
+            if (retryErr.status === 429 || (retryErr.message && retryErr.message.includes("429"))) {
+              recordRateLimit(state, retryIdx);
+            }
+            saveKeyState(state);
+          }
+        }
+      }
+    }
     if (opts.json) {
       console.log(JSON.stringify({ error: err.message }, null, 2));
     } else {
