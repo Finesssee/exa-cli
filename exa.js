@@ -8,8 +8,12 @@ import os from "os";
 
 const VERSION = "1.3.0";
 
-// Colors (respects NO_COLOR)
-const useColor = !process.env.NO_COLOR && process.stdout.isTTY;
+// Colors (respects NO_COLOR and --no-color)
+let useColor = !process.env.NO_COLOR && process.stdout.isTTY;
+function applyNoColor() {
+  useColor = false;
+  for (const key of Object.keys(c)) c[key] = "";
+}
 const c = {
   reset: useColor ? "\x1b[0m" : "",
   bold: useColor ? "\x1b[1m" : "",
@@ -293,13 +297,13 @@ function getNextKey(keys, state) {
   if (validIndices.length === 0) return null;
 
   // Filter keys not on cooldown
-  const available = validIndices.filter(i => {
+  const available = new Set(validIndices.filter(i => {
     const cd = state.keys[i].cooldownUntil;
     return !cd || now >= cd;
-  });
+  }));
 
   let selected;
-  if (available.length === 0) {
+  if (available.size === 0) {
     // All on cooldown — pick the one expiring soonest
     selected = validIndices.reduce((best, i) => {
       const cd = state.keys[i].cooldownUntil || 0;
@@ -313,11 +317,11 @@ function getNextKey(keys, state) {
   } else {
     // Round-robin with usage balancing: start from currentIndex, pick lowest usage
     const start = (state.currentIndex || 0) % keys.length;
-    let bestIdx = available[0];
+    let bestIdx = available.values().next().value;
     let bestUsage = Infinity;
     for (let offset = 0; offset < keys.length; offset++) {
       const idx = (start + offset) % keys.length;
-      if (available.includes(idx)) {
+      if (available.has(idx)) {
         const usage = state.keys[idx].requests || 0;
         if (usage < bestUsage) {
           bestUsage = usage;
@@ -391,8 +395,10 @@ async function search(exa, opts) {
   if (!opts.noCache) {
     const cached = cacheRead(ck, opts.cacheTtl);
     if (cached) {
-      const results = JSON.parse(cached);
-      return printSearchResults(opts, results);
+      try {
+        const results = JSON.parse(cached);
+        return printSearchResults(opts, results);
+      } catch { /* corrupt cache, refetch */ }
     }
   }
 
@@ -474,7 +480,11 @@ async function findSimilar(exa, opts) {
 
   if (!opts.noCache) {
     const cached = cacheRead(ck, opts.cacheTtl);
-    if (cached) return printSearchResults(opts, JSON.parse(cached));
+    if (cached) {
+      try {
+        return printSearchResults(opts, JSON.parse(cached));
+      } catch { /* corrupt cache, refetch */ }
+    }
   }
 
   const results = await exa.findSimilar(opts.query, {
@@ -493,10 +503,12 @@ async function getContent(exa, opts) {
   if (!opts.noCache) {
     const cached = cacheRead(ck, opts.cacheTtl);
     if (cached) {
-      const results = JSON.parse(cached);
-      if (results.results && results.results[0]) {
-        return printContentResult(opts, results.results[0]);
-      }
+      try {
+        const results = JSON.parse(cached);
+        if (results.results && results.results[0]) {
+          return printContentResult(opts, results.results[0]);
+        }
+      } catch { /* corrupt cache, refetch */ }
     }
   }
 
@@ -593,7 +605,7 @@ async function answer(exa, opts) {
 async function research(exa, opts) {
   const researchOpts = {
     instructions: opts.query,
-    model: opts.model === "exa-research-pro" ? "exa-research" : "exa-research-fast",
+    model: opts.model === "exa-research-pro" ? "exa-research-pro" : "exa-research",
   };
 
   if (opts.schema) {
@@ -679,6 +691,8 @@ async function research(exa, opts) {
 async function main() {
   const args = process.argv.slice(2);
   const opts = parseArgs(args);
+
+  if (opts.noColor) applyNoColor();
 
   if (opts.help || args.length === 0) {
     printHelp();
@@ -779,7 +793,7 @@ async function main() {
       }
     }
     if (opts.json) {
-      console.log(JSON.stringify({ error: err.message }, null, 2));
+      console.log(opts.compact ? JSON.stringify({ error: err.message }) : JSON.stringify({ error: err.message }, null, 2));
     } else {
       console.error(`${c.red}Error:${c.reset} ${err.message}`);
     }
