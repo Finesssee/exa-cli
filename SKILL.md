@@ -36,6 +36,18 @@ exa research "topic" --model exa-research-pro  # Thorough research model
 exa research "list items" --schema schema.json # Structured output
 ```
 
+## Company Research
+
+Use `--type auto --category company` to get structured company data (HQ, employees, funding, traffic):
+
+```bash
+exa search "Anthropic" --type auto --category company --compact -n 1
+# Output includes: about, hq, employees, funding, traffic
+
+exa search "fintech startups in Europe" --type auto --category company --compact -n 5
+exa search "AI companies" --type auto --category company --json -n 3  # Structured JSON
+```
+
 ## Key Flags
 
 - `--compact` — **Always use.** Terse output for AI/LLM consumption
