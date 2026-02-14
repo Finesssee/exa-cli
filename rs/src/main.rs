@@ -220,6 +220,61 @@ struct SearchResult {
     published_date: Option<String>,
     text: Option<String>,
     highlights: Option<Vec<String>>,
+    entities: Option<Vec<Entity>>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct Entity {
+    #[serde(rename = "type")]
+    entity_type: Option<String>,
+    properties: Option<EntityProperties>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct EntityProperties {
+    name: Option<String>,
+    #[serde(rename = "foundedYear")]
+    founded_year: Option<serde_json::Value>,
+    description: Option<String>,
+    workforce: Option<EntityWorkforce>,
+    headquarters: Option<EntityHQ>,
+    financials: Option<EntityFinancials>,
+    #[serde(rename = "webTraffic")]
+    web_traffic: Option<EntityWebTraffic>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct EntityWorkforce {
+    total: Option<u64>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct EntityHQ {
+    city: Option<String>,
+    country: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct EntityFinancials {
+    #[serde(rename = "revenueAnnual")]
+    revenue_annual: Option<serde_json::Value>,
+    #[serde(rename = "fundingTotal")]
+    funding_total: Option<f64>,
+    #[serde(rename = "fundingLatestRound")]
+    funding_latest_round: Option<EntityFundingRound>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct EntityFundingRound {
+    name: Option<String>,
+    date: Option<String>,
+    amount: Option<f64>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct EntityWebTraffic {
+    #[serde(rename = "visitsMonthly")]
+    visits_monthly: Option<u64>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -572,6 +627,108 @@ fn build_contents(cli: &Cli) -> Option<ContentsConfig> {
     }
 }
 
+/// Format a dollar amount in a human-readable way (e.g. $107.0M, $17.0M, $500K)
+fn format_dollars(amount: f64) -> String {
+    if amount >= 1_000_000_000.0 {
+        format!("${:.1}B", amount / 1_000_000_000.0)
+    } else if amount >= 1_000_000.0 {
+        format!("${:.1}M", amount / 1_000_000.0)
+    } else if amount >= 1_000.0 {
+        format!("${:.0}K", amount / 1_000.0)
+    } else {
+        format!("${:.0}", amount)
+    }
+}
+
+/// Print entity (company) data in compact or normal mode
+fn print_entity(entity: &Entity, compact: bool) {
+    let props = match &entity.properties {
+        Some(p) => p,
+        None => return,
+    };
+
+    if compact {
+        if let Some(desc) = &props.description {
+            let short = if desc.len() > 200 {
+                format!("{}...", desc[..200].trim_end())
+            } else {
+                desc.clone()
+            };
+            println!("about: {}", short);
+        }
+        if let Some(hq) = &props.headquarters {
+            let parts: Vec<&str> = [hq.city.as_deref(), hq.country.as_deref()]
+                .iter().filter_map(|x| *x).collect();
+            if !parts.is_empty() {
+                println!("hq: {}", parts.join(", "));
+            }
+        }
+        if let Some(wf) = &props.workforce {
+            if let Some(total) = wf.total {
+                println!("employees: {}", total);
+            }
+        }
+        if let Some(fin) = &props.financials {
+            if let Some(total) = fin.funding_total {
+                print!("funding: {}", format_dollars(total));
+                if let Some(round) = &fin.funding_latest_round {
+                    let round_name = round.name.as_deref().unwrap_or("?");
+                    if let Some(amt) = round.amount {
+                        print!(" (latest: {} {})", round_name, format_dollars(amt));
+                    } else {
+                        print!(" (latest: {})", round_name);
+                    }
+                }
+                println!();
+            }
+        }
+        if let Some(wt) = &props.web_traffic {
+            if let Some(visits) = wt.visits_monthly {
+                println!("traffic: {}/mo", visits.to_string().as_bytes().rchunks(3)
+                    .rev().map(|c| std::str::from_utf8(c).unwrap())
+                    .collect::<Vec<_>>().join(","));
+            }
+        }
+    } else {
+        if let Some(desc) = &props.description {
+            println!("  {}", desc);
+        }
+        if let Some(hq) = &props.headquarters {
+            let parts: Vec<&str> = [hq.city.as_deref(), hq.country.as_deref()]
+                .iter().filter_map(|x| *x).collect();
+            if !parts.is_empty() {
+                println!("  {} {}", "HQ:".dimmed(), parts.join(", "));
+            }
+        }
+        if let Some(wf) = &props.workforce {
+            if let Some(total) = wf.total {
+                println!("  {} {}", "Employees:".dimmed(), total);
+            }
+        }
+        if let Some(fin) = &props.financials {
+            if let Some(total) = fin.funding_total {
+                print!("  {} {}", "Funding:".dimmed(), format_dollars(total));
+                if let Some(round) = &fin.funding_latest_round {
+                    let round_name = round.name.as_deref().unwrap_or("?");
+                    if let Some(amt) = round.amount {
+                        print!(" (latest: {} {})", round_name, format_dollars(amt));
+                    } else {
+                        print!(" (latest: {})", round_name);
+                    }
+                }
+                println!();
+            }
+        }
+        if let Some(wt) = &props.web_traffic {
+            if let Some(visits) = wt.visits_monthly {
+                println!("  {} {}/mo", "Traffic:".dimmed(), visits.to_string().as_bytes().rchunks(3)
+                    .rev().map(|c| std::str::from_utf8(c).unwrap())
+                    .collect::<Vec<_>>().join(","));
+            }
+        }
+    }
+}
+
 /// Get cache directory path
 fn cache_dir() -> Result<PathBuf> {
     let dir = dirs::config_dir()
@@ -716,6 +873,11 @@ fn print_search_results(cli: &Cli, results: &SearchResponse) -> Result<()> {
                     }
                 }
             }
+            if let Some(entities) = &r.entities {
+                for entity in entities {
+                    print_entity(entity, true);
+                }
+            }
         }
     } else {
         for (i, r) in results.results.iter().enumerate() {
@@ -741,6 +903,11 @@ fn print_search_results(cli: &Cli, results: &SearchResponse) -> Result<()> {
                     for h in highlights {
                         println!("  {}", h);
                     }
+                }
+            }
+            if let Some(entities) = &r.entities {
+                for entity in entities {
+                    print_entity(entity, false);
                 }
             }
             println!();
