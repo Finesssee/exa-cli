@@ -15,7 +15,7 @@ cargo install exa-cli
 ### Node.js
 
 ```bash
-npm install -g @anthropic-ai/exa-cli
+npm install -g exa-cli
 # or
 npx exa-cli search "your query"
 ```
