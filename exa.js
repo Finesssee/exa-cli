@@ -1,7 +1,5 @@
 #!/usr/bin/env node
 
-console.error("\x1b[33m⚠ The Node.js version of exa-cli is deprecated. Install the Rust version: cargo install exa-cli\x1b[0m");
-
 import Exa from "exa-js";
 import crypto from "crypto";
 import path from "path";
