@@ -6,18 +6,8 @@ Built for speed. Optimized for AI agents — `--compact` mode strips all decorat
 
 ## Install
 
-### Rust (recommended)
-
 ```bash
 cargo install exa-cli
-```
-
-### Node.js
-
-```bash
-npm install -g exa-cli
-# or
-npx exa-cli search "your query"
 ```
 
 ### From source
@@ -28,6 +18,8 @@ cd exa-cli/rs
 cargo build --release
 # Binary at ./target/release/exa
 ```
+
+> **Note:** The Node.js version (`npm install -g exa-cli`) is deprecated. Use the Rust version above.
 
 ## Setup
 
